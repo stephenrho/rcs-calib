@@ -1,0 +1,5 @@
+papers/*
+p.*
+*.Rproj
+.Rproj.user/*
+.Rhistory

@@ -1,5 +1,8 @@
 papers/*
-p.*
+p.aux
+p.pdf
+p.out
+p.log
 *.Rproj
 .Rproj.user/*
 .Rhistory

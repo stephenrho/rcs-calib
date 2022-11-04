@@ -1,0 +1,232 @@
+---
+title: "Using restricted cubic splines to assess the calibration of clinical prediction models: Logit transform predicted probabilities first"
+author:
+  - Stephen Rhodes^[Urology Institute, University Hospitals Cleveland Medical Center. stephen.rhodes@uhhospitals.org]
+date: 'Last updated: `r format(Sys.time(), "%B %d, %Y")`'
+abstract: "Non-linear calibration curves allow researchers to assess the relationship between the predicted and observed probability of an outcome. This can be achieved via the use of a restricted cubic spline in a logistic regression model relating the predicted probabilities to the observed binary outcome. The present simulation study shows that using the predicted probabilities directly (the default in R functions available) leads to incorrect calibration curves that suggest miscalibration of correctly specified models. Further, the degree of the suggested miscalibration depends on the degree of non-linearity or interaction present. Better performance is achieved by first logit transforming predicted probabilities."
+output: 
+  bookdown::pdf_document2:
+    toc: false
+    number_sections: false
+urlcolor: blue
+bibliography: p.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, cache=F, fig.pos = "!h")
+```
+
+# Introduction
+
+In predicting a binary outcome (prognosis, diagnosis) it is important that the predicted probability of an outcome, $p$, aligns with the observed probability of the outcome, $y$. The closer to parity between the predicted and observed probabilities, the better *calibrated* the model. A standard approach to assessing model calibration is to use logit transformed probabilities as a single predictor in a logistic regression model predicting the observed outcome [@cox1958].
+
+@vancalster2016 note that this logistic calibration tests "weak calibration", as it primarily tests for systematic differences between observed and predicted probabilities. Subtle mis-calibration, owing to possible missing non-linear or interaction terms, can be missed by solely relying on weak calibration. "Moderate calibration" is a step above and requires allowing for a non-linear relationship between $p$ and the observed probability of $y$. This can be achieved with local regression smoothers or via logistic regression with smoothing splines. The relationship can be examined visually, with confidence intervals to convey uncertainty, and via several metrics derived from the absolute difference between each predicted probability and the value of the calibration curve at $p$, which we will call $c$: $d_i = \mid p_i - c_i \mid$. $E_{\mbox{max}}$ [@harrell2015] takes the maximum absolute difference across the range of predicted probabilities ($E_{\mbox{max}} = \max(d_i)$), $E_{90}$ is the 90th percentile of $d$, $E_{50}$ is the median absolute difference, and the 'integrated calibration index' (ICI or $E_{\mbox{avg}}$) is the average of $d$ [@austin2019]. 
+
+In `R` the function `val.prob` from the `rms` package [@rms] uses `lowess` to plot a non-linear function. The `CalibrationCurves` package [@ccurves] has an extension of this function (`val.prob.ci.2`) that uses `loess` or logistic regression with a restricted cubic spline (RCS) to produce a non-linear calibration curve with 95% confidence intervals. For data sets with more than 5000 observations, which is often desirable for developing clinical prediction models [@riley2020], `CalibrationCurves` suggests using the `rcs` method, as `loess` runs slowly. As implemented, the default placement of knots from `rms::rcs` is used, which places knots at quantiles based on the number of knots requested (.05, .25, .5, .75, .95 for 5 knots). More importantly, the predicted probabilities themselves are used as the predictor; in `R` syntax: `y ~ rcs(p, nk)`, where `nk` is the number of knots requested. Figure \@ref(fig:sim0)A shows that this method fails to detect perfect calibration.
+
+```{r, echo=F}
+library(rms)
+
+set.seed(2468)
+
+n = 100000
+# p = rbeta(n, 10, 100) # uncomment this line and comment below to change distribution
+
+p = plogis(rnorm(n, mean = -3, sd = 1))
+
+y = rbinom(n, size = 1, prob = p) # p(y) = p = perfect calibration
+
+d = data.frame('y'=y,'p'=p,'lp'=qlogis(p))
+
+dd = datadist(d); options("datadist"="dd")
+
+lrm1 = lrm(y ~ rcs(p, 4), data = d, x=T, y=T)
+lrm2 = lrm(y ~ rcs(lp, 4), data = d, x=T, y=T)
+
+```
+
+We simulated `r n` predicted probabilities, `p`, from the logistic (inverse logit) transform of a Normal(-3, 1) distribution, which gave a median prediction of `r round(median(p)*100,1)`% (IQR: `r sprintf("%.1f, %.1f", quantile(p, .25)*100, quantile(p, .75)*100)`). These probabilities were used directly to simulate an outcome, `y`, from a Bernoulli distribution. Therefore, the 'model predictions' in this case are perfectly calibrated. We then used `lrm` from the `rms` package to fit logistic regression models relating p or logit(p) to `y` via a restricted cubic spline with 4 knots, using the default knot placement at the .05, .35, .65, and .95 quantiles. 
+
+Figure \@ref(fig:sim0)A shows that the standard approach, of using $p$ directly, fails and suggests that the predictions are poorly calibrated at higher risk levels. While the degree of miscalibration is small, ($E_{max}$ suggests the maximum discrepancy is ~7%) this deviation is occurring with a relatively large number of 'observations' where an adequate method of assessing moderate calibration should support good calibration at all risk levels. Further, as miscalibration can suggest that non-linear or interaction effects have not been included in the model [@vancalster2016], the kind of miscalibration in Figure \@ref(fig:sim0)A could spur model developers to include additional parameters when they are not needed. 
+
+@austin2019 have already reported simulation results showing that the standard RCS method leads to the highest values of the different calibration metrics for correctly specified models, compared to `lowess` and `loess`. Figure \@ref(fig:sim0)B shows that the performance of `rcs` can be improved by logit transforming $p$, which results in the calibration curve, correctly, following the diagonal.
+
+```{r sim0, fig.cap="Two calibration curves from a simulation with perfect calibration. (A) Curve using predicted probabilities directly. (B) Curve using logit transformed predicted probabilities.", fig.height=4, fig.width=8}
+
+library(ggplot2)
+library(gridExtra)
+
+print_metric = function(p, pc){
+  d = abs(p - pc)
+  sprintf("ICI = %.3f\nE50 = %.3f\nE90 = %.3f\nEmax = %.3f", 
+          mean(d), median(d), quantile(d, .9), max(d))
+}
+
+p1 = Predict(lrm1) |>
+  as.data.frame() |>
+  ggplot(aes(x = p, y=plogis(yhat), ymin=plogis(lower), ymax=plogis(upper))) +
+  geom_abline(intercept=0,slope=1, col="blue", lty=2) +
+  #geom_vline(xintercept = rcspline.eval(x = d$p, nk = 4, knots.only = T), 
+  #           lty=3, col="darkred") + 
+  geom_line() + geom_ribbon(alpha=1/4) +
+  theme_bw() + lims(x=c(0,1), y=c(0,1)) + ggtitle("A. y ~ rcs(p, 4)") + 
+  labs(x = "Prediction", y = "Actual (suggested by model)") + 
+  geom_text(aes(x=.7, y=.2, hjust=1, label= print_metric(p, plogis(yhat)))) + 
+  theme(panel.grid = element_blank())
+
+p2 = Predict(lrm2) |>
+  as.data.frame() |>
+  ggplot(aes(x = plogis(lp), y=plogis(yhat), ymin=plogis(lower), ymax=plogis(upper))) +
+  geom_abline(intercept=0,slope=1, col="blue", lty=2) +
+  #geom_vline(xintercept = plogis(rcspline.eval(x = d$lp, nk = 4, knots.only = T)), 
+  #           lty=3, col="darkred") + 
+  geom_line() + geom_ribbon(alpha=1/4) +
+  theme_bw() + lims(x=c(0,1), y=c(0,1)) + ggtitle("B. y ~ rcs(logit(p), 4)") +
+  labs(x = "Prediction", y = "Actual (suggested by model)") + 
+  geom_text(aes(x=.7, y=.2, hjust=1, label= print_metric(plogis(lp), plogis(yhat)))) + theme(panel.grid = element_blank())
+
+grid.arrange(p1, p2, nrow=1)
+
+```
+
+This simple simulation shows a case in which the approach implemented in popular software fails. Below we present additional simulations assessing the performance of these two approaches to creating calibration curves using RCS.
+
+<!--[^cc]: Running `CalibrationCurves::val.prob.ci.2(p = d$p, y = d$y, smooth = "rcs", nr.knots = 4)` reproduces Figure \@ref(fig:sim0)A.-->
+
+# Simulations
+
+The Monte Carlo simulations reported here were adapted from those reported in @austin2019. In simulation 1 we simulated data with a true quadratic relationship and in simulation 2 there was a true interaction effect. The magnitude of the non-linear or interaction coefficient was varied. In both sets of simulation we fit a correctly specified model and a misspecified model that omitted the non-linear or interaction effect. We extended the simulations in two ways: (1) we varied the baseline probability of the outcome (via an intercept term) so as to vary the distribution of predicted probabilities, and (2) we doubled the maximum sample size assessed. The `R` code written to implement these simulations is available at: https://github.com/stephenrho/rcs-calib.
+
+## Simulation 1 - non-linear relationship
+
+In this simulation a single covariate was assumed to relate to the log odds of the outcome via a quadratic relationship. Specifically, for the $i$th simulated observation: $\mbox{logit}(p_i) = a_1 + x_i + a_2x_i^2$, where $x_i$ was sampled from a standard normal distribution. The intercept, $a_1$, was varied between simulations to vary the distribution of predicted probabilities and could be -3, -1.5, or 0. The quadratic coefficient, $a_2$, was varied between 0.1 and 1 in steps of 0.1. Values of the outcome, $y_i$, were sampled from a Bernoulli distribution with the probability of success determined by $p_i$. We generated samples of size $2N$ and split them into development and validation sets each of size $N$. $N$ could be 1000, 2000, 5000, or 10000. Four calibration curve methods were applied to the predicted probabilities from the two models considered: loess, lowess, RCS with $p$, and RCS with $\mbox{logit}(p)$. One thousand simulations were run for each of the 120 combinations of parameter values. Values of ICI, E max, E50, and E90 were averaged across the 1000 runs.
+
+## Simulation 2 - interaction
+
+In the second simulation there were two covariates that interacted to predict the outcome: $\mbox{logit}(p_i) = a_1 + x_{1i} + x_{2i} + a_3x_{1i}x_{2i}$. The two variables, $x_1$ and $x_2$, were sampled from independent standard normal distributions. The magnitude of the interaction coefficient, $a_3$, was varied between 0.1 and 1 in steps of 1. Otherwise simulation 2 was identical to simulation 1.
+
+# Results
+
+## Simulation 1
+
+Figure \@ref(fig:sim1-cor) compares calibration metrics for standard RCS and RCS with logit transformed $p$ (RCS + logit(p)) applied to a correctly specified model, which included the quadratic term. The difference between the two methods for ICI, E50, and E90 becomes more pronounced with a larger quadratic term, $a_2$. At a given $N$, these scores increase for RCS with a larger quadratic term, suggesting that this method is susceptible to the degree of underlying non-linearity. For RCS + logit(p) there is no clear relationship between $a_2$ and ICI or E50. There is a positive relationship between $a_2$ and E90 for RCS + logit(p) in simulations with with a left shifted distribution of predicted probabilities ($a_1 = -3$), but the magnitude of this relationship reduces with increasing $N$. The difference between the two methods in ICI, E50, and E90 increases with greater $N$ (compare the red and purple lines in Figure \@ref(fig:sim1-cor)), suggesting that the RCS method is converging on an incorrect calibration curve for a correctly specified model. The differences between the two methods are present at both the average difference between the predicted and estimated probabilities (ICI) and median (E50), but are most pronounced at the 90th percentile (E90) and maximum (E max). 
+
+Supplemental figures show that RCS + logit(p) performs more similarly to other commonly used methods (lowess, loess) for the correctly specified quadratic model across the range of simulation settings (Figure \@ref(fig:sim1-all-cor)). The standard RCS approach, on the other hand, results in consistently higher values of all of the calibration metrics considered (see Figure \@ref(fig:sim1-all-avcor) for values averaged across all simulations).
+
+```{r sim1-cor, out.width="1.2\\linewidth", fig.cap="Average calibration metrics across 1000 runs for the correctly specified model including a quadratic relationship."}
+knitr::include_graphics("sim/plots/sim1-rcs-Correct.pdf")
+```
+
+For the misspecified model, which did not include a quadratic term, the differences between RCS and RCS + logit(p) are less pronounced (Figure \@ref(fig:sim1-mis)). For both methods, as expected, increasing the size of the true quadratic effect is associated with larger values of the calibration metrics. For E50 the relationship is slightly steeper for RCS, which results in this method having slightly larger scores relative to RCS + logit(p) at the largest values of $a_2$. The biggest difference between the two methods is seen for E max, where RCS + logit(p) detects the largest absolute differences between predicted and observed probabilities, especially for larger values of the quadratic term.
+
+Relative to the other commonly used methods, loess and lowess, the two RCS methods do a little better in that they result in higher values of calibration metrics for misspecified models (Figure \@ref(fig:sim1-all-mis)), with the exception of E max where loess and RCS + logit(p) have the highest average scores (Figure \@ref(fig:sim1-all-avmis)).
+
+```{r sim1-mis, out.width="1.2\\linewidth", fig.cap="Average calibration metrics across 1000 runs for the misspecified model without a quadratic relationship."}
+knitr::include_graphics("sim/plots/sim1-rcs-Misspecified.pdf")
+```
+
+To summarize simulation 1, the difference between RCS and RCS + logit(p) is most pronounced when applied to a correctly specified model and this difference increases with larger sample size. In this case the two approaches do not clearly differ in their ability to point towards model misspecification, with the exception of the most extreme discrepancy between predicted and observed probabilities (E max). Supplemental Figure \@ref(fig:sim1-diff) shows the difference in calibration metrics between the correctly and incorrectly specified models. At increasingly larger samples sizes the model difference in ICI and E50 is largest for RCS + logit(p) relative to standard RCS. For E90 and E max the difference between the two methods are also apparent at the smallest sample size. This demonstrates the more desirable performance of RCS + logit(p) in determining better calibrated models.
+
+## Simulation 2
+
+Figure \@ref(fig:sim2-cor) presents calibration metrics for the two RCS approaches when applied to a correctly specified model, in this case one that includes the interaction between $x_1$ and $x_2$. Similar to the previous simulation, the difference between the methods in ICI, E50, and E90 becomes more pronounced as the magnitude of the interaction, $a_3$, increases. This is especially true at larger samples size, where increasing the size of the interaction increases ICI, E50, and, to a lesser extent, E50 for the standard RCS approach, whereas these measures do not vary greatly as a function of $a_3$ for the RCS + logit(p) approach. Again, the difference between the two methods was most pronounced for E90 and E max.
+
+For the correctly specified model, RCS + logit(p) performs similarly to loess and lowess, whereas RCS stands out in resulting in the largest values of calibration metrics (Figures \@ref(fig:sim2-all-cor) and \@ref(fig:sim2-all-avcor)).
+
+```{r sim2-cor, out.width="1.2\\linewidth", fig.cap="Average calibration metrics across 1000 runs for the correctly specified model including an interaction term."}
+knitr::include_graphics("sim/plots/sim2-rcs-Correct.pdf")
+```
+
+Figure \@ref(fig:sim2-mis) shows that the two RCS methods do not differ substantially when applied to the misspecified model, which omits the interaction term. For E90 and E max the standard RCS approach leads to slightly higher scores relative to RCS + logit(p), a differences that reduces as the magnitude of the underlying interaction term increases. 
+
+Taking the difference in calibration metrics between the correctly specified model and the misspecified model we find that RCS + logit(p) results in the largest difference in the expected direction at all sample sizes (Figure \@ref(fig:sim2-diff)).
+
+```{r sim2-mis, out.width="1.2\\linewidth", fig.cap="Average calibration metrics across 1000 runs for the misspecified model without an interaction term."}
+knitr::include_graphics("sim/plots/sim2-rcs-Misspecified.pdf")
+```
+
+In summary, simulation 2 also shows that standard RCS on predicted probabilities leads to undesirable behavior for the correctly specified, and therefore well calibrated, model. ICI, E50, and E90 in particular show a relationship with the underlying interaction coefficient, $a_3$, for the RCS approach. On the other hand, logit transforming predicted probabilities improves performance and leads to similar performance to other commonly used approaches (Figures \@ref(fig:sim2-all-cor) and \@ref(fig:sim2-all-avcor)).
+
+The difference between RCS methods was less obvious for the misspecified model but its good performance for the correctly specified model means that RCS + logit(p) does best when discriminating between the correct and misspecified models (Figures \@ref(fig:sim2-all-diff) and \@ref(fig:sim2-all-avdiff)).
+
+# Discussion
+
+The simulations reported here show that, when using a restricted cubic spline to create a calibration curve, it is best to first logit transform predicted probabilities. Applying RCS without first transforming the predicted probabilities leads to poor performance, especially for well specified models (Figure \@ref(fig:sim0)A). In particular, with this method values of most calibration metrics are dependent on the degree of underlying non-linearity or interaction. Logit transforming the predicted probabilities prior to applying RCS improves behavior and results in similar performance to other often used approaches (loess, lowess).
+
+# References
+
+<div id="refs"></div>
+
+\newpage
+
+# Supplemental Figures
+
+\setcounter{page}{1}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{S\arabic{figure}}
+
+## Simulation 1
+
+```{r sim1-diff, out.width="1.2\\linewidth", fig.cap="Average difference in calibration metrics (correct - misspecified) across 1000 runs from simulation 1."}
+knitr::include_graphics("sim/plots/sim1-rcs-Difference.pdf")
+```
+
+Figures \@ref(fig:sim1-all-cor), \@ref(fig:sim1-all-mis), and \@ref(fig:sim1-all-diff) show the results for all calibration curve methods from simulations with $N = 10000$. Figures for the other values of $N$ are available at https://github.com/stephenrho/rcs-calib/tree/main/sim/plots.
+
+```{r sim1-all-cor, out.width="1.2\\linewidth", fig.cap="Average calibration metrics for all methods across 1000 runs for the correctly specified model from simulation 1. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim1-all-N10000-Correct.pdf")
+```
+
+```{r sim1-all-mis, out.width="1.2\\linewidth", fig.cap="Average calibration metrics for all methods across 1000 runs for the misspecified model from simulation 1. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim1-all-N10000-Misspecified.pdf")
+```
+
+```{r sim1-all-diff, out.width="1.2\\linewidth", fig.cap="Average difference in calibration metrics (correct - misspecified) for all methods across 1000 runs from simulation 1. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim1-all-N10000-Difference.pdf")
+```
+
+```{r sim1-all-avcor, out.width="\\linewidth", fig.cap="Average calibration metrics across all simulations for the correctly specified model from simulation 1."}
+knitr::include_graphics("sim/plots/sim1-average-Correct.pdf")
+```
+
+```{r sim1-all-avmis, out.width="\\linewidth", fig.cap="Average calibration metrics across all simulations for the misspecified model from simulation 1."}
+knitr::include_graphics("sim/plots/sim1-average-Misspecified.pdf")
+```
+
+```{r sim1-all-avdiff, out.width="\\linewidth", fig.cap="Average difference (correct - misspecified) in calibration metrics across all simulations from simulation 1."}
+knitr::include_graphics("sim/plots/sim1-average-Difference.pdf")
+```
+
+\clearpage
+
+## Simulation 2
+
+```{r sim2-diff, out.width="1.2\\linewidth", fig.cap="Average difference in calibration metrics (correct - misspecified) across 1000 runs from simulation 2."}
+knitr::include_graphics("sim/plots/sim2-rcs-Difference.pdf")
+```
+
+Figures \@ref(fig:sim2-all-cor), \@ref(fig:sim2-all-mis), and \@ref(fig:sim2-all-diff) show the results for all calibration curve methods from simulations with $N = 10000$. Figures for the other values of $N$ are available at https://github.com/stephenrho/rcs-calib/tree/main/sim/plots.
+
+```{r sim2-all-cor, out.width="1.2\\linewidth", fig.cap="Average calibration metrics for all methods across 1000 runs for the correctly specified model from simulation 2. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim2-all-N10000-Correct.pdf")
+```
+
+```{r sim2-all-mis, out.width="1.2\\linewidth", fig.cap="Average calibration metrics for all methods across 1000 runs for the misspecified model from simulation 2. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim2-all-N10000-Misspecified.pdf")
+```
+
+```{r sim2-all-diff, out.width="1.2\\linewidth", fig.cap="Average difference in calibration metrics (correct - misspecified) for all methods across 1000 runs from simulation 2. These results are from the simulations with N = 10000."}
+knitr::include_graphics("sim/plots/sim2-all-N10000-Difference.pdf")
+```
+
+```{r sim2-all-avcor, out.width="\\linewidth", fig.cap="Average calibration metrics across all simulations for the correctly specified model from simulation 2."}
+knitr::include_graphics("sim/plots/sim2-average-Correct.pdf")
+```
+
+```{r sim2-all-avmis, out.width="\\linewidth", fig.cap="Average calibration metrics across all simulations for the misspecified model from simulation 2."}
+knitr::include_graphics("sim/plots/sim2-average-Misspecified.pdf")
+```
+
+```{r sim2-all-avdiff, out.width="\\linewidth", fig.cap="Average difference (correct - misspecified) in calibration metrics across all simulations from simulation 2."}
+knitr::include_graphics("sim/plots/sim2-average-Difference.pdf")
+```
